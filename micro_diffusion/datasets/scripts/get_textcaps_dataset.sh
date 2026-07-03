@@ -4,6 +4,7 @@
 datadir=$1
 num_gpus=$2
 mode=${3:-default}
+stage=${4:-all}
 
 num_proc=16
 batch_size=32 # use batch size of 8 for <16GB GPU memory
@@ -20,11 +21,28 @@ else
     precompute_args=""
 fi
 
-# Textcaps is fairly small so we download all of it. We also download and process the data is a single script.
-python micro_diffusion/datasets/prepare/textcaps/convert.py --local_mds_dir "$mds_dir" $convert_args
+if [ "$stage" = "all" ] || [ "$stage" = "convert" ]; then
+    # Textcaps is fairly small so we download all of it during conversion to MDS.
+    python micro_diffusion/datasets/prepare/textcaps/convert.py --local_mds_dir "$mds_dir" $convert_args
+fi
 
-# Precompute latents across multiple GPUs.
-python -c "from streaming.base.util import clean_stale_shared_memory; clean_stale_shared_memory()"
-accelerate launch --multi_gpu --num_processes $num_gpus micro_diffusion/datasets/prepare/textcaps/precompute.py --datadir "$mds_dir" \
-    --savedir "$latents_dir" --vae stabilityai/stable-diffusion-xl-base-1.0 \
-    --text_encoder openclip:hf-hub:apple/DFN5B-CLIP-ViT-H-14-378 --batch_size $batch_size $precompute_args
+if [ "$stage" = "convert" ]; then
+    exit 0
+fi
+
+if [ "$stage" = "all" ] || [ "$stage" = "precompute" ]; then
+    # Precompute latents across one or more GPUs from an existing MDS directory.
+    python -c "from streaming.base.util import clean_stale_shared_memory; clean_stale_shared_memory()"
+    if [ "$num_gpus" -gt 1 ]; then
+        accelerate_args="--multi_gpu --num_processes $num_gpus"
+    else
+        accelerate_args="--num_processes 1"
+    fi
+
+    accelerate launch $accelerate_args micro_diffusion/datasets/prepare/textcaps/precompute.py --datadir "$mds_dir" \
+        --savedir "$latents_dir" --vae stabilityai/stable-diffusion-xl-base-1.0 \
+        --text_encoder openclip:hf-hub:apple/DFN5B-CLIP-ViT-H-14-378 --batch_size $batch_size $precompute_args
+else
+    echo "Unknown stage: $stage. Use one of: all, convert, precompute."
+    exit 1
+fi

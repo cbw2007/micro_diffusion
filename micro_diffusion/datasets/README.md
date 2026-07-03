@@ -65,6 +65,19 @@ For TextCaps region-weighted finetuning, generate OCR bbox-derived text masks wi
 ```bash
 bash micro_diffusion/datasets/scripts/get_textcaps_dataset.sh ./datadir/textcaps 8 region
 ```
+On Windows PowerShell, use:
+```powershell
+powershell -ExecutionPolicy Bypass -File micro_diffusion/datasets/scripts/get_textcaps_dataset.ps1 ./datadir/textcaps 1 region
+```
+Split TextCaps conversion and latent precomputation to avoid repeating conversion if precompute fails:
+```bash
+bash micro_diffusion/datasets/scripts/get_textcaps_dataset.sh ./datadir/textcaps 8 region convert
+bash micro_diffusion/datasets/scripts/get_textcaps_dataset.sh ./datadir/textcaps 8 region precompute
+```
+```powershell
+powershell -ExecutionPolicy Bypass -File micro_diffusion/datasets/scripts/get_textcaps_dataset.ps1 ./datadir/textcaps 1 region convert
+powershell -ExecutionPolicy Bypass -File micro_diffusion/datasets/scripts/get_textcaps_dataset.ps1 ./datadir/textcaps 1 region precompute
+```
 
 Validate number of successfully process samples in latent dataset.
 ```python
