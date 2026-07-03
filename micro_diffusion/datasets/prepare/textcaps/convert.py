@@ -1,12 +1,15 @@
 import json
 import os
 import math
+import zipfile
 from argparse import ArgumentParser
+from pathlib import Path
 from typing import Dict, List, Any, Optional
 
 import numpy as np
 import torch
-from datasets import load_dataset
+from datasets import DownloadConfig, load_dataset
+from PIL import Image
 from streaming.base import MDSWriter
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -23,6 +26,15 @@ def parse_arguments() -> ArgumentParser:
         "--local_mds_dir",
         type=str,
         help="Directory to store mds shards.",
+    )
+    parser.add_argument(
+        "--raw_data_dir",
+        type=str,
+        default=None,
+        help=(
+            "Directory with manually downloaded TextCaps files. When set, convert "
+            "uses local files and does not call HuggingFace load_dataset."
+        ),
     )
     parser.add_argument(
         "--save_text_bboxes",
@@ -43,8 +55,43 @@ def parse_arguments() -> ArgumentParser:
         choices=("auto", "xyxy", "xywh"),
         help="Format for list-like bbox fields. Dict fields with named corners/sizes are inferred.",
     )
+    parser.add_argument(
+        "--download_timeout",
+        type=int,
+        default=3600,
+        help="Total HTTP download timeout in seconds for HuggingFace datasets downloads.",
+    )
+    parser.add_argument(
+        "--download_retries",
+        type=int,
+        default=5,
+        help="Number of retries used by HuggingFace datasets downloads when supported.",
+    )
     args = parser.parse_args()
     return args
+
+
+def build_download_config(args: ArgumentParser) -> DownloadConfig:
+    storage_options = {}
+    try:
+        import aiohttp
+
+        storage_options = {
+            "client_kwargs": {
+                "timeout": aiohttp.ClientTimeout(total=args.download_timeout),
+            }
+        }
+    except ImportError:
+        print("aiohttp is unavailable; using datasets default HTTP timeout.")
+
+    try:
+        return DownloadConfig(
+            max_retries=args.download_retries,
+            storage_options=storage_options,
+        )
+    except TypeError:
+        print("This datasets version does not support max_retries/storage_options; using default download config.")
+        return DownloadConfig()
 
 
 def collate_fn(batch: List[Dict[str, Any]]) -> Dict[str, List[Any]]:
@@ -154,6 +201,27 @@ def extract_text_bboxes(
             "bbox",
         ],
     )
+    if bbox_key is None and "ocr_info" in sample:
+        bboxes = []
+        for ocr_item in sample["ocr_info"]:
+            bounding_box = ocr_item.get("bounding_box", {})
+            if not isinstance(bounding_box, dict):
+                continue
+            raw_bbox = {
+                "left": bounding_box.get("top_left_x", 0.0),
+                "top": bounding_box.get("top_left_y", 0.0),
+                "width": bounding_box.get("width", 0.0),
+                "height": bounding_box.get("height", 0.0),
+            }
+            bbox = _normalize_bbox(
+                raw_bbox,
+                width=width,
+                height=height,
+                bbox_format=bbox_format,
+            )
+            if bbox is not None:
+                bboxes.append(bbox)
+        return bboxes
     if bbox_key is None:
         return []
 
@@ -182,12 +250,140 @@ def extract_text_bboxes(
     return bboxes
 
 
+def _find_required_file(raw_data_dir: Path, filename: str) -> Path:
+    matches = list(raw_data_dir.rglob(filename))
+    if not matches:
+        raise FileNotFoundError(
+            f"Could not find {filename} under {raw_data_dir}. "
+            "Download TextCaps raw JSON/image files before running convert."
+        )
+    return matches[0]
+
+
+def _open_image_from_path_or_zip(
+    image_name: str,
+    images_dir: Optional[Path],
+    images_zip: Optional[zipfile.ZipFile],
+) -> Image.Image:
+    image_filename = image_name if image_name.lower().endswith(".jpg") else f"{image_name}.jpg"
+    if images_dir is not None:
+        image_path = images_dir / image_filename
+        if image_path.exists():
+            with Image.open(image_path) as img:
+                return img.convert("RGB").copy()
+    if images_zip is not None:
+        for member in (
+            f"train_images/{image_filename}",
+            f"test_images/{image_filename}",
+            image_filename,
+        ):
+            try:
+                with images_zip.open(member) as image_file:
+                    with Image.open(image_file) as img:
+                        return img.convert("RGB").copy()
+            except KeyError:
+                continue
+    raise FileNotFoundError(f"Could not find image {image_filename}")
+
+
+def _build_ocr_by_image_id(ocr_path: Path) -> Dict[str, Dict[str, Any]]:
+    ocr_items = json.load(open(ocr_path, "r"))["data"]
+    return {ocr_item["image_id"]: ocr_item for ocr_item in ocr_items}
+
+
+def convert_from_raw_data_dir(args: ArgumentParser) -> None:
+    raw_data_dir = Path(args.raw_data_dir)
+    caption_paths = [
+        _find_required_file(raw_data_dir, "TextCaps_0.1_train.json"),
+        _find_required_file(raw_data_dir, "TextCaps_0.1_val.json"),
+    ]
+    ocr_paths = [
+        _find_required_file(raw_data_dir, "TextVQA_Rosetta_OCR_v0.2_train.json"),
+        _find_required_file(raw_data_dir, "TextVQA_Rosetta_OCR_v0.2_val.json"),
+    ]
+
+    images_dir_matches = list(raw_data_dir.rglob("train_images"))
+    images_dir = images_dir_matches[0] if images_dir_matches else None
+    images_zip_path = None
+    zip_matches = list(raw_data_dir.rglob("train_val_images.zip"))
+    if images_dir is None and zip_matches:
+        images_zip_path = zip_matches[0]
+    if images_dir is None and images_zip_path is None:
+        raise FileNotFoundError(
+            "Could not find train_images/ or train_val_images.zip under "
+            f"{raw_data_dir}."
+        )
+
+    columns = {
+        "height": "int32",
+        "width": "int32",
+        "jpg": "jpeg",
+        "image_id": "str",
+        "caption": "str",
+    }
+    if args.save_text_bboxes:
+        columns["text_bboxes"] = "str"
+
+    writer = MDSWriter(
+        out=args.local_mds_dir,
+        columns=columns,
+        compression=None,
+        size_limit=256 * (2**20),
+        max_workers=64,
+    )
+
+    total_written = 0
+    images_zip = zipfile.ZipFile(images_zip_path) if images_zip_path is not None else None
+    try:
+        for caption_path, ocr_path in zip(caption_paths, ocr_paths):
+            captions = json.load(open(caption_path, "r"))["data"]
+            ocr_by_image_id = _build_ocr_by_image_id(ocr_path)
+            seen_image_ids = set()
+            for caption_item in tqdm(captions, desc=f"Converting {caption_path.name}"):
+                image_id = caption_item["image_id"]
+                if image_id in seen_image_ids:
+                    continue
+                seen_image_ids.add(image_id)
+                if not caption_item.get("reference_strs"):
+                    continue
+
+                image = _open_image_from_path_or_zip(
+                    caption_item["image_name"],
+                    images_dir=images_dir,
+                    images_zip=images_zip,
+                )
+                mds_sample = {
+                    "height": int(caption_item["image_height"]),
+                    "width": int(caption_item["image_width"]),
+                    "jpg": image,
+                    "image_id": image_id,
+                    "caption": caption_item["reference_strs"][0],
+                }
+                if args.save_text_bboxes:
+                    sample = dict(caption_item)
+                    sample["ocr_info"] = ocr_by_image_id.get(image_id, {}).get("ocr_info", [])
+                    mds_sample["text_bboxes"] = json.dumps(
+                        extract_text_bboxes(sample, bbox_format=args.bbox_format)
+                    )
+                writer.write(mds_sample)
+                total_written += 1
+    finally:
+        if images_zip is not None:
+            images_zip.close()
+        writer.finish()
+    print(f"Total {total_written} samples in textcaps dataset")
+
+
 def main():
     args = parse_arguments()
+    if args.raw_data_dir is not None:
+        convert_from_raw_data_dir(args)
+        return
 
     ds = load_dataset(
         "HuggingFaceM4/TextCaps",
         split="train+validation",
+        download_config=build_download_config(args),
     )
     loader = DataLoader(
         ds,

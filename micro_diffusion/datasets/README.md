@@ -78,6 +78,15 @@ bash micro_diffusion/datasets/scripts/get_textcaps_dataset.sh ./datadir/textcaps
 powershell -ExecutionPolicy Bypass -File micro_diffusion/datasets/scripts/get_textcaps_dataset.ps1 ./datadir/textcaps 1 region convert
 powershell -ExecutionPolicy Bypass -File micro_diffusion/datasets/scripts/get_textcaps_dataset.ps1 ./datadir/textcaps 1 region precompute
 ```
+If you download TextCaps manually, put the raw files in one directory and pass it as the fifth argument. The converter expects `TextCaps_0.1_train.json`, `TextCaps_0.1_val.json`, `TextVQA_Rosetta_OCR_v0.2_train.json`, `TextVQA_Rosetta_OCR_v0.2_val.json`, and either `train_val_images.zip` or an extracted `train_images/` directory.
+```bash
+bash micro_diffusion/datasets/scripts/get_textcaps_dataset.sh ./datadir/textcaps 1 region convert ./datadir/textcaps/raw
+bash micro_diffusion/datasets/scripts/get_textcaps_dataset.sh ./datadir/textcaps 1 region precompute
+```
+For unstable TextCaps downloads, override retry and timeout values:
+```bash
+TEXTCAPS_CONVERT_RETRIES=10 TEXTCAPS_DOWNLOAD_TIMEOUT=7200 bash micro_diffusion/datasets/scripts/get_textcaps_dataset.sh ./datadir/textcaps 8 region convert
+```
 
 Validate number of successfully process samples in latent dataset.
 ```python
