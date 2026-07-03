@@ -1,0 +1,123 @@
+exp_name: MicroDiTXL_textcaps_region_res_512_finetune
+seed: 18
+algorithms:
+  ema:
+    _target_: diffusion.algorithms.ema.EMA
+    half_life: null
+    smoothing: 0.9975
+    update_interval: 1ba
+    ema_start: 1000ba
+  low_precision_layernorm:
+   precision: amp_bf16
+  gradient_clipping:
+    clipping_type: norm
+    clip_norm: 0.5
+model:
+  _target_: micro_diffusion.models.model.create_latent_diffusion
+  vae_name: stabilityai/stable-diffusion-xl-base-1.0
+  text_encoder_name: openclip:hf-hub:apple/DFN5B-CLIP-ViT-H-14-378
+  dit_arch: MicroDiT_XL_2
+  precomputed_latents: true
+  in_channels: 4
+  pos_interp_scale: 2.0
+  dtype: 'bfloat16'
+  latent_res: 64
+  p_mean: 0
+  p_std: 0.6
+  train_mask_ratio: 0.0
+  region_weight:
+    enabled: true
+    mask_key: text_region_mask
+    text_weight: 4.0
+    normalize: true
+dataset:
+  image_size: 512 # 8 * latent_res
+  train_batch_size: 2048
+  eval_batch_size: 1024
+  cap_drop_prob: 0.1
+  train:
+    _target_: micro_diffusion.datasets.latents_loader.build_streaming_latents_dataloader
+    datadir:
+      - ./datadir/textcaps/mds_latents_sdxl1_dfnclipH14_region/
+    drop_last: true
+    shuffle: true
+    prefetch_factor: 2
+    num_workers: 2
+    persistent_workers: true
+    pin_memory: true
+  eval:
+    _target_: micro_diffusion.datasets.latents_loader.build_streaming_latents_dataloader
+    datadir: ./datadir/coco2014/mds_latents_sdxl1_dfnclipH14/
+    drop_last: false
+    shuffle: true
+    prefetch_factor: 2
+    num_workers: 2
+    persistent_workers: true
+    pin_memory: true
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 8e-5
+  weight_decay: 0.1
+  eps: 1.0e-8
+  betas:
+    - 0.9
+    - 0.999
+scheduler:
+  _target_: composer.optim.ConstantScheduler
+  alpha: 1.0
+logger:
+  progress:
+    _target_: composer.loggers.TensorboardLogger
+  # wandb:
+  #   _target_: composer.loggers.wandb_logger.WandBLogger
+  #   name: ${exp_name}
+  #   project: microdit_training #insert wandb project name
+  #   group: ${exp_name}
+callbacks:
+  speed_monitor:
+    _target_: composer.callbacks.speed_monitor.SpeedMonitor
+    window_size: 3
+  lr_monitor:
+    _target_: composer.callbacks.lr_monitor.LRMonitor
+  runtime_estimator:
+    _target_: composer.callbacks.runtime_estimator.RuntimeEstimator
+  optimizer_monitor:
+    _target_: composer.callbacks.OptimizerMonitor
+  image_monitor:
+    _target_: micro_diffusion.models.callbacks.LogDiffusionImages
+    prompts:
+      - A green road sign that says "VERY DEEP LEARNING" in large white letters
+      - A storefront window with a neon sign that says "OPEN 24 HOURS"
+      - A restaurant menu board that clearly says "COFFEE TEA CAKE"
+      - A red poster with bold white text that says "SALE TODAY"
+      - A black t-shirt with yellow text that says "MICRO DIFFUSION"
+      - A wooden desk nameplate that says "TEXTCAPS"
+      - A blue book cover with the title "LATENT MODELS" printed on it
+      - A cardboard box label that says "FRAGILE GLASS"
+      - A white mug with the words "HELLO WORLD" printed in black
+      - A city billboard at night that says "AI FOR TEXT"
+    guidance_scale: 5
+    sampling_steps: 30
+    seed: ${seed}
+  nan_catcher:
+    _target_: micro_diffusion.models.callbacks.NaNCatcher
+trainer:
+  _target_: composer.Trainer
+  device: gpu
+  max_duration: 55000ba
+  eval_interval: 500ba
+  save_interval: 500ba
+  save_num_checkpoints_to_keep: 1
+  device_train_microbatch_size: 16
+  run_name: ${exp_name}
+  seed: ${seed}
+  save_folder: ./trained_models/${exp_name}/
+  load_path: path_to_existing_text_or_general_model_ckpt
+  load_strict_model_weights: false
+  load_ignore_keys: ["state/optimizers/AdamW/param_groups/initial_lr", "state/optimizers/AdamW/param_groups/lr", "state/schedulers/LambdaLR/base_lrs", "state/schedulers/LambdaLR/_last_lr"]
+  save_overwrite: true
+  autoresume: false
+  fsdp_config:
+    sharding_strategy: "SHARD_GRAD_OP"
+misc:
+  compile: true

@@ -59,12 +59,22 @@ class StreamingLatentsDataset(StreamingDataset):
                 np.frombuffer(sample['latents_256'], dtype=np.float16)
                 .copy()
             ).reshape(-1, 32, 32)
+            if 'text_region_mask_256' in sample:
+                out['text_region_mask'] = torch.from_numpy(
+                    np.frombuffer(sample['text_region_mask_256'], dtype=np.uint8)
+                    .copy()
+                ).reshape(1, 32, 32).float()
 
         if self.image_size == 512 and 'latents_512' in sample:
             out['image_latents'] = torch.from_numpy(
                 np.frombuffer(sample['latents_512'], dtype=np.float16)
                 .copy()
             ).reshape(-1, 64, 64)
+            if 'text_region_mask_512' in sample:
+                out['text_region_mask'] = torch.from_numpy(
+                    np.frombuffer(sample['text_region_mask_512'], dtype=np.uint8)
+                    .copy()
+                ).reshape(1, 64, 64).float()
 
         # out['caption'] = sample['caption']
         return out

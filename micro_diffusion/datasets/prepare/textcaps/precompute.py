@@ -56,6 +56,18 @@ def parse_args() -> ArgumentParser:
         help="If True, also save images, else only latents",
     )
     parser.add_argument(
+        "--save_text_region_masks",
+        default=False,
+        action="store_true",
+        help="If True, save downsampled text-region masks for region-weighted training.",
+    )
+    parser.add_argument(
+        "--text_region_dilate_px",
+        type=int,
+        default=4,
+        help="Number of image pixels to dilate text boxes before downsampling to latent masks.",
+    )
+    parser.add_argument(
         "--model_dtype",
         type=str,
         choices=("float16", "bfloat16", "float32"),
@@ -125,6 +137,8 @@ def main(args: ArgumentParser) -> None:
         shuffle=False,
         caption_key=cap_key,
         tokenizer_name=args.text_encoder,
+        save_text_region_masks=args.save_text_region_masks,
+        text_region_dilate_px=args.text_region_dilate_px,
         prefetch_factor=2,
         num_workers=2,
         persistent_workers=True,
@@ -162,6 +176,11 @@ def main(args: ArgumentParser) -> None:
     }
     if args.save_images:
         columns["jpg"] = "jpeg"
+    if args.save_text_region_masks:
+        if 256 in args.image_resolutions:
+            columns["text_region_mask_256"] = "bytes"
+        if 512 in args.image_resolutions:
+            columns["text_region_mask_512"] = "bytes"
 
     remote_upload = os.path.join(args.savedir, str(accelerator.process_index))
     writer = MDSWriter(
@@ -224,6 +243,17 @@ def main(args: ArgumentParser) -> None:
                     "latents_256": latents_256[i].tobytes(),
                     "latents_512": latents_512[i].tobytes(),
                 }
+                if args.save_text_region_masks:
+                    for resolution_idx, resolution in enumerate(args.image_resolutions):
+                        if resolution not in (256, 512):
+                            continue
+                        mask_key = f"text_region_mask_{resolution_idx}"
+                        if mask_key not in batch:
+                            continue
+                        text_region_mask = batch[mask_key][i].detach().cpu().numpy()
+                        mds_sample[f"text_region_mask_{resolution}"] = (
+                            text_region_mask.astype(np.uint8).tobytes()
+                        )
                 if args.save_images:
                     mds_sample["jpg"] = batch["sample"][i]["jpg"]
                 writer.write(mds_sample)

@@ -61,6 +61,11 @@ bash micro_diffusion/datasets/scripts/get_textcaps_dataset.sh ./datadir/textcaps
 bash micro_diffusion/datasets/scripts/get_coco_dataset.sh ./datadir/coco2014 8
 ```
 
+For TextCaps region-weighted finetuning, generate OCR bbox-derived text masks with:
+```bash
+bash micro_diffusion/datasets/scripts/get_textcaps_dataset.sh ./datadir/textcaps 8 region
+```
+
 Validate number of successfully process samples in latent dataset.
 ```python
 from micro_diffusion.datasets.latents_loader import build_streaming_latents_dataloader

@@ -1,5 +1,5 @@
 from functools import partial
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import numpy as np
 import torch
@@ -59,7 +59,8 @@ class LatentDiffusion(ComposerModel):
         latent_res: int = 32,
         p_mean: float = -0.6,
         p_std: float = 1.2,
-        train_mask_ratio: float = 0.
+        train_mask_ratio: float = 0.,
+        region_weight: Optional[Any] = None,
     ):
         super().__init__()
         self.dit = dit
@@ -87,6 +88,7 @@ class LatentDiffusion(ComposerModel):
         self.train_mask_ratio = train_mask_ratio
         self.eval_mask_ratio = 0.  # no masking during sampling/evaluation
         assert self.train_mask_ratio >= 0, 'Masking ratio must be non-negative!'
+        self.region_weight = region_weight or {}
 
         self.randn_like = torch.randn_like
         self.latent_scale = self.vae.config.scaling_factor
@@ -134,12 +136,31 @@ class LatentDiffusion(ComposerModel):
                 [-1] + [1] * (len(conditioning.shape) - 1)
             )
 
+        region_mask = None
+        if self._region_weight_enabled() and self.training:
+            mask_key = self._region_weight_value('mask_key', 'text_region_mask')
+            if mask_key not in batch:
+                raise KeyError(
+                    f"region_weight.enabled=True but batch is missing '{mask_key}'. "
+                    "Regenerate TextCaps latents with --save_text_region_masks or disable region_weight."
+                )
+            region_mask = batch[mask_key]
+
         loss = self.edm_loss(
             latents.float(),
             conditioning.float(),
-            mask_ratio=self.train_mask_ratio if self.training else self.eval_mask_ratio
+            mask_ratio=self.train_mask_ratio if self.training else self.eval_mask_ratio,
+            region_mask=region_mask,
         )
         return (loss, latents, conditioning)
+
+    def _region_weight_value(self, key: str, default: Any) -> Any:
+        if isinstance(self.region_weight, dict):
+            return self.region_weight.get(key, default)
+        return getattr(self.region_weight, key, default)
+
+    def _region_weight_enabled(self) -> bool:
+        return bool(self._region_weight_value('enabled', False))
 
     def model_forward_wrapper(
         self,
@@ -178,7 +199,14 @@ class LatentDiffusion(ComposerModel):
         out['sample'] = D_x
         return out
 
-    def edm_loss(self, x: torch.Tensor, y: torch.Tensor, mask_ratio: float = 0, **kwargs) -> torch.Tensor:
+    def edm_loss(
+        self,
+        x: torch.Tensor,
+        y: torch.Tensor,
+        mask_ratio: float = 0,
+        region_mask: Optional[torch.Tensor] = None,
+        **kwargs
+    ) -> torch.Tensor:
         rnd_normal = torch.randn([x.shape[0], 1, 1, 1], device=x.device)
         sigma = (rnd_normal * self.edm_config.P_std + self.edm_config.P_mean).exp()
         weight = (
@@ -197,6 +225,26 @@ class LatentDiffusion(ComposerModel):
         )
         D_xn = model_out['sample']
         loss = weight * ((D_xn - x) ** 2)  # (N, C, H, W)
+        if self.training and self._region_weight_enabled():
+            if region_mask is None:
+                raise KeyError("region_weight.enabled=True but no region_mask was provided.")
+            text_weight = float(self._region_weight_value('text_weight', 4.0))
+            normalize = bool(self._region_weight_value('normalize', True))
+            region_mask = region_mask.to(device=loss.device, dtype=loss.dtype)
+            if region_mask.ndim == 3:
+                region_mask = region_mask.unsqueeze(1)
+            if region_mask.shape[-2:] != loss.shape[-2:]:
+                raise ValueError(
+                    "text_region_mask spatial shape must match latent loss shape: "
+                    f"got {tuple(region_mask.shape[-2:])}, expected {tuple(loss.shape[-2:])}"
+                )
+            region_weights = 1.0 + (text_weight - 1.0) * region_mask.clamp(0, 1)
+            if normalize:
+                region_weights = region_weights / region_weights.mean(
+                    dim=(1, 2, 3),
+                    keepdim=True,
+                ).clamp_min(1e-6)
+            loss = loss * region_weights
 
         if mask_ratio > 0:
             # Masking is not feasible during image generation as it only returns denoised version
@@ -364,7 +412,8 @@ def create_latent_diffusion(
     precomputed_latents: bool = True,
     p_mean: float = -0.6,
     p_std: float = 1.2,
-    train_mask_ratio: float = 0.
+    train_mask_ratio: float = 0.,
+    region_weight: Optional[Any] = None,
 ) -> LatentDiffusion:
     # retrieve max sequence length (s) and token embedding dim (d) from text encoder
     s, d = text_encoder_embedding_format(text_encoder_name)
@@ -400,6 +449,7 @@ def create_latent_diffusion(
         latent_res=latent_res,
         p_mean=p_mean,
         p_std=p_std,
-        train_mask_ratio=train_mask_ratio
+        train_mask_ratio=train_mask_ratio,
+        region_weight=region_weight,
     )
     return model
