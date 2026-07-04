@@ -1,0 +1,11 @@
+# MicroDiT 图像生成 prompts 示例文件
+# 每行一个 prompt，# 开头的行为注释
+
+A photo of a cat wearing a hat
+A beautiful sunset over mountains with a lake
+An astronaut riding a horse on Mars
+A cozy cabin in a snowy forest
+A cyberpunk city at night with neon lights
+A watercolor painting of flowers in a vase
+A cute robot playing guitar
+An elegant squirrel pirate on a ship
