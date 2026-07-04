@@ -112,7 +112,7 @@ trainer:
   run_name: ${exp_name}
   seed: ${seed}
   save_folder: ./trained_models/${exp_name}/
-  load_path: path_to_existing_text_or_general_model_ckpt
+  load_path: ./trained_models/latest-rank0.pt
   load_strict_model_weights: false
   load_ignore_keys: ["state/optimizers/AdamW/param_groups/initial_lr", "state/optimizers/AdamW/param_groups/lr", "state/schedulers/LambdaLR/base_lrs", "state/schedulers/LambdaLR/_last_lr"]
   save_overwrite: true

@@ -94,9 +94,9 @@ def parse_args():
     parser.add_argument(
         "--dtype",
         type=str,
-        default="bfloat16",
+        default="float16",
         choices=["float16", "bfloat16", "float32"],
-        help="模型数据类型 (默认: bfloat16)"
+        help="模型数据类型 (默认: float16, 如果硬件支持 bfloat16 可选 bfloat16)"
     )
     
     # 生成参数
@@ -214,6 +214,7 @@ def main():
     print(f"   - 通道数: {args.in_channels}")
     print(f"   - Latent 分辨率: {args.latent_res}x{args.latent_res}")
     print(f"   - 位置编码缩放: {args.pos_interp_scale}")
+    print(f"   - 数据类型: {args.dtype}")
     
     model = create_latent_diffusion(
         vae_name=args.vae_name,
@@ -264,7 +265,7 @@ def main():
         print(f"   生成 {args.num_images} 张图像, 步数={args.num_inference_steps}, CFG={args.guidance_scale}")
         
         with torch.no_grad():
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with torch.autocast(device_type="cuda", dtype=getattr(torch, args.dtype)):
                 images = model.generate(
                     prompt=[prompt] * args.num_images,
                     num_inference_steps=args.num_inference_steps,
