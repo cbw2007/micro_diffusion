@@ -32,6 +32,7 @@
 """
 
 import argparse
+import math
 import os
 from typing import List, Optional
 
@@ -228,7 +229,7 @@ def main():
     ).to(args.device)
     
     # ============================================================
-    # 3. 加载 checkpoint
+    # 3. 加载 checkpoint（支持多种格式，自动检测分辨率）
     # ============================================================
     print(f"\n📦 加载 checkpoint: {args.ckpt_path}")
     if not os.path.exists(args.ckpt_path):
@@ -236,20 +237,77 @@ def main():
     
     ckpt = torch.load(args.ckpt_path, map_location=args.device)
     
-    # 判断 checkpoint 类型：只包含 DiT 权重还是完整模型
-    if isinstance(ckpt, dict):
-        # 检查是否是完整的模型 checkpoint（包含 dit、vae 等键）
-        if "dit" in ckpt or "state_dict" in ckpt:
-            print("   检测到完整模型 checkpoint，使用 model.load_state_dict()")
-            model.load_state_dict(ckpt.get("state_dict", ckpt), strict=False)
-        else:
-            # 假设只包含 DiT 权重
-            print("   检测到 DiT 权重 checkpoint，使用 model.dit.load_state_dict()")
-            model.dit.load_state_dict(ckpt)
+    # ---- 探测 checkpoint 内部结构 ----
+    if isinstance(ckpt, dict) and "state_dict" in ckpt:
+        # Composer 格式: {"state_dict": {...}, "optimizers": ..., ...}
+        raw_state = ckpt["state_dict"]
+        ckpt_format = "composer"
+    elif isinstance(ckpt, dict) and any(k.startswith("blocks.") or k.startswith("x_embedder.") for k in ckpt.keys()):
+        # 纯 DiT 权重（HuggingFace 预训练格式），key 如 "blocks.0.attn..."
+        raw_state = ckpt
+        ckpt_format = "dit_only"
+    elif isinstance(ckpt, dict) and any(k.startswith("dit.") for k in ckpt.keys()):
+        # 完整模型权重但不在 state_dict 嵌套中，key 如 "dit.blocks.0..."
+        raw_state = ckpt
+        ckpt_format = "full_model"
     else:
-        # 旧格式，直接是 state_dict
-        print("   使用 model.dit.load_state_dict()")
-        model.dit.load_state_dict(ckpt)
+        raw_state = ckpt
+        ckpt_format = "unknown"
+    print(f"   格式: {ckpt_format}")
+
+    # ---- 通过 pos_embed 自动检测 checkpoint 对应的 latent_res ----
+    def _detect_latent_res(state):
+        """通过 pos_embed 形状推断 latent_res。pos_embed shape = [1, num_patches, dim]。"""
+        for key in ["pos_embed", "dit.pos_embed"]:
+            if key in state:
+                num_patches = state[key].shape[1]
+                return int(math.isqrt(num_patches) * 2)  # patch_size=2
+        return None
+
+    detected_res = _detect_latent_res(raw_state)
+    if detected_res and detected_res != args.latent_res:
+        print(f"\n⚠️  检测到 checkpoint latent_res={detected_res} (对应 {detected_res*8}×{detected_res*8})")
+        print(f"   当前参数: latent_res={args.latent_res} (对应 {args.latent_res*8}×{args.latent_res*8})")
+        print(f"   自动修正: latent_res={detected_res}, pos_interp_scale={detected_res/32:.1f}")
+        args.latent_res = detected_res
+        args.pos_interp_scale = detected_res / 32.0
+        # 用正确参数重建模型
+        model = create_latent_diffusion(
+            vae_name=args.vae_name,
+            text_encoder_name=args.text_encoder_name,
+            dit_arch=args.dit_arch,
+            latent_res=args.latent_res,
+            in_channels=args.in_channels,
+            pos_interp_scale=args.pos_interp_scale,
+            dtype=args.dtype,
+            precomputed_latents=True,
+        ).to(args.device)
+
+    # ---- 加载权重，根据格式选择不同的加载策略 ----
+    if ckpt_format == "dit_only":
+        # 纯 DiT 权重，key 无前缀，直接加载到 model.dit
+        print("   加载纯 DiT 权重 → model.dit.load_state_dict()")
+        model.dit.load_state_dict(raw_state, strict=True)
+    elif ckpt_format in ("composer", "full_model"):
+        # 完整模型权重，key 带 "dit." 前缀，用 model.load_state_dict
+        # strict=False 因为 VAE/text_encoder 由 create_latent_diffusion 预加载
+        print("   加载完整模型权重 → model.load_state_dict(strict=False)")
+        missing, unexpected = model.load_state_dict(raw_state, strict=False)
+        # 只报告 DiT 相关的 missing/unexpected
+        dit_missing = [k for k in missing if k.startswith("dit.")]
+        dit_unexpected = [k for k in unexpected if k.startswith("dit.")]
+        if dit_missing:
+            print(f"   ⚠️  DiT 缺失键: {len(dit_missing)} 个 (前5个: {dit_missing[:5]})")
+        if dit_unexpected:
+            print(f"   ⚠️  DiT 多余键: {len(dit_unexpected)} 个 (前5个: {dit_unexpected[:5]})")
+    else:
+        # 尝试两种方式加载
+        print("   未知格式，尝试 model.dit.load_state_dict()")
+        try:
+            model.dit.load_state_dict(raw_state, strict=True)
+        except RuntimeError:
+            print("   失败，尝试 model.load_state_dict(strict=False)")
+            model.load_state_dict(raw_state, strict=False)
     
     model.eval()
     print("   ✅ 模型加载完成")
@@ -265,13 +323,19 @@ def main():
         print(f"   生成 {args.num_images} 张图像, 步数={args.num_inference_steps}, CFG={args.guidance_scale}")
         
         with torch.no_grad():
-            with torch.autocast(device_type="cuda", dtype=getattr(torch, args.dtype)):
-                images = model.generate(
-                    prompt=[prompt] * args.num_images,
-                    num_inference_steps=args.num_inference_steps,
-                    guidance_scale=args.guidance_scale,
-                    seed=args.seed,
-                )
+            # 注意：不使用 autocast！EDM 采样器内部已精确管理精度：
+            # - 采样循环使用 float64（避免数值不稳定）
+            # - 模型前向使用 float32（通过 .to(torch.float32) 显式转换）
+            # 外部 autocast 会覆盖这些精度控制，导致 NaN → 全黑图像
+            images = model.generate(
+                prompt=[prompt] * args.num_images,
+                num_inference_steps=args.num_inference_steps,
+                guidance_scale=args.guidance_scale,
+                seed=args.seed,
+            )
+        
+        # 诊断：打印生成图像的统计信息
+        print(f"   像素范围: min={images.min().item():.4f}, max={images.max().item():.4f}, mean={images.mean().item():.4f}")
         
         all_images.append(images)
         
